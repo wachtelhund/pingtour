@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+
+  ::selection {
+    background-color: rgba(0, 255, 132, 0.3);
+  }
+}
+
+@layer components {
+  .src-card {
+    @apply rounded-xl border border-border bg-secondary;
+  }
+
+  .src-btn {
+    @apply inline-flex items-center justify-center rounded-lg px-4 py-2
+           text-sm font-semibold transition-colors disabled:opacity-50
+           disabled:cursor-not-allowed;
+  }
+
+  .src-btn-primary {
+    @apply src-btn bg-primary text-primary-fg hover:brightness-110;
+  }
+
+  .src-btn-ghost {
+    @apply src-btn bg-transparent text-fg border border-border
+           hover:bg-secondary;
+  }
+
+  .src-btn-destructive {
+    @apply src-btn bg-destructive text-destructive-fg hover:brightness-110;
+  }
+
+  .src-input {
+    @apply w-full rounded-lg border border-border bg-bg px-3 py-2 text-fg
+           placeholder:text-muted-fg focus:outline-none focus:ring-2
+           focus:ring-ring;
+  }
+}
+
+/* Bracket connector lines drawn with pseudo-elements */
+.bracket-col {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+}
