@@ -98,7 +98,11 @@ Client-side (read by Vite at build / dev startup; put in `.env.local`):
 
 | Variable               | Default                  | Purpose                                                    |
 | ---------------------- | ------------------------ | ---------------------------------------------------------- |
-| `VITE_PUBLIC_BASE_URL` | `window.location.origin` | URL embedded in the join QR code, if it should differ from the URL the TV uses (e.g. when phones can't reach the TV's local network and need an ngrok tunnel instead). Restart `pnpm dev` after changing. |
+| `VITE_PUBLIC_BASE_URL` | `window.location.origin` | URL embedded in the join QR code, if it should differ from the URL the TV uses (e.g. when phones can't reach the TV's local network and need a tunnel instead). |
+| `VITE_WS_URL`          | same origin as the page  | WebSocket endpoint. Only needed for split deploys where the frontend (e.g. Amplify) and the WebSocket backend (e.g. App Runner) live on different origins. Accepts `wss://host/ws` or `https://host` (will become `wss://host/ws`). |
+
+Both are baked into the JS bundle at `pnpm build` time. Restart `pnpm dev`
+or rerun the build after changing.
 
 The default password prints a warning at startup. **Change it before the
 tournament:** `ADMIN_PASSWORD='something' pnpm start`. The password is
@@ -164,7 +168,51 @@ cloudflared tunnel --url http://localhost:3939       # or: ngrok http 3939
 Set `VITE_PUBLIC_BASE_URL` to the tunnel URL in `.env.local` and
 rebuild so the QR points at the tunnel, not at `localhost`.
 
-### Option C — any Docker host
+### Option C — AWS Amplify (frontend) + App Runner (backend)
+
+This is a **split deploy** — Amplify Hosting serves the static frontend
+and App Runner runs the WebSocket server. Two services, two URLs, but
+both stay inside AWS. The repo includes `amplify.yml` (Amplify build
+spec) and `deploy/apprunner.yaml` (App Runner notes).
+
+**1. Backend on App Runner.** App Runner Console → "Source code
+repository" → pick this repo → "Automatic" deploy. It detects the
+`Dockerfile` and builds it. Set environment variables in the console:
+
+```
+ADMIN_PASSWORD = something-strong
+```
+
+App Runner gives you a URL like
+`https://<random>.<region>.awsapprunner.com`. Copy it.
+
+> ⚠️ App Runner has **no persistent volume**. State resets on every
+> deploy and instance restart. Fine for a one-day tournament, painful
+> for anything longer-lived. For persistence, use ECS Fargate + EFS,
+> Lightsail Containers (same Dockerfile), or one of the other options
+> above.
+
+**2. Frontend on Amplify.** Amplify Console → "Host web app" → connect
+the repo. Amplify auto-detects `amplify.yml`. Set env vars under **App
+settings → Environment variables**:
+
+```
+VITE_WS_URL           = wss://<your-apprunner-url>/ws
+VITE_PUBLIC_BASE_URL  = https://<your-amplify-url>
+```
+
+(Or use a custom domain in Amplify and use that for
+`VITE_PUBLIC_BASE_URL`.)
+
+Add the SPA rewrite rule in the Amplify Console under **Rewrites and
+redirects** — the exact pattern is in the comment block at the bottom
+of `amplify.yml`. Without it, `/admin` and `/join` 404 instead of
+loading the SPA shell.
+
+Trigger a redeploy. The frontend at the Amplify URL will WebSocket-connect
+to the App Runner URL.
+
+### Option D — any Docker host
 
 ```sh
 docker build -t pingtour .

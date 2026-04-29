@@ -1,0 +1,41 @@
+# AWS App Runner config for the backend (the Node + WebSocket server).
+# App Runner builds the Dockerfile in the repo root and runs it as a
+# managed service with native WebSocket support.
+#
+# Use this file by selecting "Source code repository → automatic" in the
+# App Runner Console and pointing it at this repo. Or deploy via CLI:
+#
+#   aws apprunner create-service --cli-input-json file://deploy/apprunner-service.json
+#
+# Required runtime env vars (set in the App Runner Console, NOT here —
+# these are secrets):
+#
+#   ADMIN_PASSWORD       a strong password
+#
+# Optional:
+#
+#   PORT                 default 3939; App Runner sends ${PORT} which
+#                        Docker picks up automatically
+#
+# Persistent storage: App Runner does NOT have built-in persistent
+# volumes. The tournament JSON state will be lost on each deploy /
+# instance restart. For a single-day tournament that may be acceptable;
+# for anything longer-lived, switch to one of:
+#   - ECS Fargate + EFS volume mount
+#   - Lightsail Containers (same Dockerfile)
+#   - DigitalOcean Droplet (see README)
+
+version: 1.0
+runtime: docker
+build:
+  commands:
+    build:
+      - echo "Build is handled by Dockerfile"
+run:
+  command: pnpm start
+  network:
+    port: 3939
+    env: PORT
+  env:
+    - name: DATA_FILE
+      value: /tmp/tournament.json

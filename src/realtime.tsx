@@ -44,6 +44,21 @@ const RealtimeContext = createContext<RealtimeContextValue | null>(null);
 
 function wsUrl(): string {
   if (typeof window === 'undefined') return '';
+  // Allow split deploys (e.g. frontend on Amplify, backend on App Runner)
+  // to override the WebSocket origin. Accepts either a full ws://… URL or
+  // an https://host that we'll convert to wss://host/ws.
+  const override = (import.meta.env.VITE_WS_URL as string | undefined)?.trim();
+  if (override) {
+    if (override.startsWith('ws://') || override.startsWith('wss://')) {
+      return override;
+    }
+    if (override.startsWith('http://')) {
+      return `ws://${override.slice('http://'.length).replace(/\/$/, '')}/ws`;
+    }
+    if (override.startsWith('https://')) {
+      return `wss://${override.slice('https://'.length).replace(/\/$/, '')}/ws`;
+    }
+  }
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws`;
 }

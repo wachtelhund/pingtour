@@ -1,0 +1,44 @@
+# AWS Amplify Hosting build spec.
+#
+# This deploys ONLY the static frontend (`dist/`). The Node WebSocket
+# server in `server/` is not run by Amplify Hosting — host it on AWS App
+# Runner (or any container host) and point the frontend at it via
+# VITE_WS_URL and VITE_PUBLIC_BASE_URL (set both as Amplify env vars).
+#
+# Required env vars (set in Amplify Console → App settings → Environment):
+#
+#   VITE_WS_URL            wss://your-backend.awsapprunner.com/ws
+#   VITE_PUBLIC_BASE_URL   https://your-frontend.amplifyapp.com (or your domain)
+#
+# Both are baked into the JS bundle at build time. Amplify rebuilds on
+# every push, so changing env vars takes effect on the next deploy.
+
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - corepack enable
+        - corepack prepare pnpm@10.33.0 --activate
+        - pnpm install --frozen-lockfile
+    build:
+      commands:
+        - pnpm build
+  artifacts:
+    baseDirectory: dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - node_modules/**/*
+      - ~/.local/share/pnpm/store/**/*
+
+# SPA fallback so /admin and /join load index.html instead of 404'ing.
+# Apply this in the Amplify Console under "Rewrites and redirects":
+#
+#   Source address:    </^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>
+#   Target address:    /index.html
+#   Type:              200 (Rewrite)
+#
+# Amplify doesn't read this from the build spec — it has to be set in
+# the console (or via CloudFormation / CDK).
