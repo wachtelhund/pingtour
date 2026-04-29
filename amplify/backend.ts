@@ -4,11 +4,9 @@ import {
   BillingMode,
   Table,
 } from 'aws-cdk-lib/aws-dynamodb';
-import { Duration } from 'aws-cdk-lib';
 import {
   Function as LambdaFunction,
   FunctionUrlAuthType,
-  HttpMethod,
 } from 'aws-cdk-lib/aws-lambda';
 import { apiFunction } from './functions/api/resource';
 
@@ -30,15 +28,14 @@ lambda.addEnvironment('STATE_TABLE_NAME', stateTable.tableName);
 
 // Public Function URL — no IAM auth, browser hits it directly. The
 // Lambda enforces password-cookie auth on mutations.
+//
+// CORS is handled by the Lambda itself (it echoes the request Origin
+// in `access-control-allow-origin` and sets `allow-credentials: true`),
+// which is the only way to allow credentialed requests from any origin.
+// The CDK `cors` block here would force `allowedOrigins: ['*']` plus
+// `allowCredentials: true`, which AWS rejects at deploy time.
 const fnUrl = lambda.addFunctionUrl({
   authType: FunctionUrlAuthType.NONE,
-  cors: {
-    allowedOrigins: ['*'],
-    allowedMethods: [HttpMethod.GET, HttpMethod.POST, HttpMethod.OPTIONS],
-    allowedHeaders: ['content-type'],
-    allowCredentials: true,
-    maxAge: Duration.minutes(10),
-  },
 });
 
 // Surface the URL in `amplify_outputs.json` for the frontend to pick up.
