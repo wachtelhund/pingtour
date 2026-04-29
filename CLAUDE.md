@@ -40,29 +40,31 @@ src/
 
 ## Protocol
 
-All client/server messages are `JSON.stringify`-ed `ClientMsg` /
-`ServerMsg` (see `src/protocol.ts`). Connections are per-client; auth is
-tracked server-side in a `WeakSet<WebSocket>`.
+REST + polling. Clients hit `GET /api/state` every ~1.5s and `POST
+/api/mutate` for changes (see `src/protocol.ts`). Admin auth is via an
+HTTP-only cookie (`pingtour_admin`) issued by `POST /api/mutate` with
+`{type:"auth"}`.
 
 ```
-C→S { type: 'auth',          password }
-C→S { type: 'create-lobby',  name }                          // requires auth
-C→S { type: 'remove-player', playerId }                      // requires auth
-C→S { type: 'start',         shuffleSeeds }                  // requires auth
-C→S { type: 'join',          name }                          // PUBLIC — no auth needed
-C→S { type: 'record',        matchId, winnerSide, score }    // requires auth
-C→S { type: 'clear',         matchId }                       // requires auth
-C→S { type: 'reset' }                                        // requires auth
-
-S→C { type: 'state',         tournament: Tournament | null } // on connect + after every mutation
-S→C { type: 'auth-ok' | 'auth-fail' }
-S→C { type: 'joined',        playerId }                      // confirms a public join
-S→C { type: 'error',         message }                       // sent only to the offending client
+GET  /api/state                          → { tournament, version }
+POST /api/mutate { type:"auth", password } → sets cookie + returns state
+POST /api/mutate { type:"create-lobby"  } // requires admin cookie
+POST /api/mutate { type:"remove-player" } // requires admin cookie
+POST /api/mutate { type:"start" }         // requires admin cookie
+POST /api/mutate { type:"join", name }    // PUBLIC — no auth
+POST /api/mutate { type:"record" }        // requires admin cookie
+POST /api/mutate { type:"clear" }         // requires admin cookie
+POST /api/mutate { type:"reset" }         // requires admin cookie
 ```
 
 `Tournament.status` cycles: `'lobby'` → `'running'` → `'complete'`.
 A lobby has empty `matches` and `bracketSize === 0`. `startTournament()`
 preserves the lobby's `id` and `createdAt` so QR codes remain valid.
+
+Each successful mutation bumps an in-memory `version` counter. The
+client tracks the last-seen version and only re-renders when it
+changes, which makes the 1.5s poll cheap (just a tiny JSON if nothing's
+changed, no React re-renders).
 
 After applying a mutation, the server saves to `data/tournament.json` and
 broadcasts the new `state` to every connected client (including the
@@ -72,10 +74,11 @@ copy of state to optimistic-update.
 ## Auth
 
 - `ADMIN_PASSWORD` env var on the server (default `pingpong123`).
-- Client sends `{type:'auth', password}`; server replies `auth-ok` or
-  `auth-fail` and tracks per-connection auth state.
-- Password is cached client-side in `sessionStorage` so reconnects
-  re-auth automatically; on `auth-fail` the cache is cleared.
+- Client POSTs `{type:'auth', password}`; on success the server issues
+  an HTTP-only cookie `pingtour_admin=<random>` (24h max-age) and adds
+  the token to its in-memory `adminSessions` set.
+- Mutations check the cookie. The set is in-memory, so a server
+  restart logs everyone out — fine for a single-day tournament.
 
 ## Domain rules
 

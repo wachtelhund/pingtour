@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
-import { WebSocketServer, WebSocket } from 'ws';
+import crypto from 'node:crypto';
 import {
   addPlayer,
   clearResult,
@@ -11,7 +11,7 @@ import {
   removePlayer,
   startTournament,
 } from '../src/bracket';
-import type { ClientMsg, ServerMsg } from '../src/protocol';
+import type { ApiRequest, MutationResponse, StateResponse } from '../src/protocol';
 import type { Tournament } from '../src/types';
 import { dataFilePath, loadState, saveState } from './state';
 
@@ -20,16 +20,151 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD ?? 'pingpong123';
 const STATIC_DIR = path.resolve('dist');
 
 let tournament: Tournament | null = loadState();
+let version = 0;
 
-const httpServer = http.createServer((req, res) => {
-  const u = url.parse(req.url ?? '');
-  if (u.pathname === '/healthz') {
-    res.writeHead(200, { 'content-type': 'text/plain' });
-    res.end('ok');
+/** Cookie-based admin sessions, kept in memory. */
+const adminSessions = new Set<string>();
+
+const httpServer = http.createServer(async (req, res) => {
+  try {
+    const u = url.parse(req.url ?? '');
+    const pathname = u.pathname ?? '/';
+
+    if (pathname === '/healthz') {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (pathname === '/api/state' && req.method === 'GET') {
+      sendJson<StateResponse>(res, 200, { tournament, version });
+      return;
+    }
+    if (pathname === '/api/mutate' && req.method === 'POST') {
+      const body = await readJson<ApiRequest>(req);
+      handleMutation(req, res, body);
+      return;
+    }
+
+    serveStatic(req, res);
+  } catch (e) {
+    console.error('[pingtour] handler error:', e);
+    sendJson(res, 500, { ok: false, error: 'Internal server error' });
+  }
+});
+
+function handleMutation(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  msg: ApiRequest,
+) {
+  // Auth + public join are special-cased before the auth gate.
+  if (msg.type === 'auth') {
+    if (typeof msg.password === 'string' && msg.password === ADMIN_PASSWORD) {
+      const token = crypto.randomBytes(24).toString('hex');
+      adminSessions.add(token);
+      res.setHeader(
+        'Set-Cookie',
+        `pingtour_admin=${token}; Path=/; SameSite=Lax; HttpOnly; Max-Age=86400`,
+      );
+      sendMutation(res, { ok: true, tournament, version });
+      return;
+    }
+    sendMutation(res, { ok: false, authFail: true });
     return;
   }
-  serveStatic(req, res);
-});
+
+  if (msg.type === 'join') {
+    try {
+      if (!tournament || tournament.status !== 'lobby') {
+        throw new Error('No lobby is open');
+      }
+      const before = tournament.players.length;
+      tournament = addPlayer(tournament, msg.name);
+      const newPlayer = tournament.players[before];
+      bumpAndPersist();
+      sendMutation(res, {
+        ok: true,
+        tournament,
+        version,
+        playerId: newPlayer.id,
+      });
+    } catch (e) {
+      sendMutation(res, {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    return;
+  }
+
+  // Everything else requires the admin cookie.
+  if (!isAdmin(req)) {
+    sendMutation(res, { ok: false, error: 'Not authenticated' });
+    return;
+  }
+
+  try {
+    if (msg.type === 'create-lobby') {
+      tournament = createLobby(msg.name);
+    } else if (msg.type === 'remove-player') {
+      if (!tournament) throw new Error('No tournament running');
+      tournament = removePlayer(tournament, msg.playerId);
+    } else if (msg.type === 'start') {
+      if (!tournament) throw new Error('No lobby to start');
+      tournament = startTournament(tournament, {
+        shuffleSeeds: msg.shuffleSeeds,
+      });
+    } else if (msg.type === 'record') {
+      if (!tournament) throw new Error('No tournament running');
+      tournament = recordResult(tournament, {
+        matchId: msg.matchId,
+        winnerSide: msg.winnerSide,
+        score: msg.score,
+      });
+    } else if (msg.type === 'clear') {
+      if (!tournament) throw new Error('No tournament running');
+      tournament = clearResult(tournament, msg.matchId);
+    } else if (msg.type === 'reset') {
+      tournament = null;
+    }
+    bumpAndPersist();
+    sendMutation(res, { ok: true, tournament, version });
+  } catch (e) {
+    sendMutation(res, {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+function bumpAndPersist() {
+  version++;
+  saveState(tournament);
+}
+
+function isAdmin(req: http.IncomingMessage): boolean {
+  const cookie = req.headers.cookie ?? '';
+  const match = cookie.match(/(?:^|;\s*)pingtour_admin=([^;]+)/);
+  return match ? adminSessions.has(match[1]) : false;
+}
+
+async function readJson<T>(req: http.IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const raw = Buffer.concat(chunks).toString('utf8');
+  return JSON.parse(raw || '{}') as T;
+}
+
+function sendJson<T>(res: http.ServerResponse, status: number, body: T) {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  });
+  res.end(JSON.stringify(body));
+}
+
+function sendMutation(res: http.ServerResponse, body: MutationResponse) {
+  sendJson(res, body.ok ? 200 : 400, body);
+}
 
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse) {
   if (!fs.existsSync(STATIC_DIR)) {
@@ -39,7 +174,6 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse) {
   }
   const u = url.parse(req.url ?? '');
   const reqPath = decodeURIComponent(u.pathname ?? '/');
-  // Resolve and confine to STATIC_DIR.
   const candidate = path.normalize(path.join(STATIC_DIR, reqPath));
   if (!candidate.startsWith(STATIC_DIR)) {
     res.writeHead(403);
@@ -62,7 +196,6 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse) {
     }
   }
   if (!stat) {
-    // SPA fallback — serve index.html for unknown paths.
     target = path.join(STATIC_DIR, 'index.html');
     try {
       stat = fs.statSync(target);
@@ -92,116 +225,6 @@ function contentType(p: string): string {
   }
 }
 
-const wss = new WebSocketServer({ noServer: true });
-const authed = new WeakSet<WebSocket>();
-
-httpServer.on('upgrade', (req, socket, head) => {
-  const u = url.parse(req.url ?? '');
-  if (u.pathname !== '/ws') {
-    socket.destroy();
-    return;
-  }
-  wss.handleUpgrade(req, socket, head, ws => {
-    wss.emit('connection', ws, req);
-  });
-});
-
-wss.on('connection', ws => {
-  send(ws, { type: 'state', tournament });
-  ws.on('message', raw => {
-    let msg: ClientMsg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-    handleMessage(ws, msg);
-  });
-});
-
-function handleMessage(ws: WebSocket, msg: ClientMsg) {
-  if (msg.type === 'auth') {
-    if (typeof msg.password === 'string' && msg.password === ADMIN_PASSWORD) {
-      authed.add(ws);
-      send(ws, { type: 'auth-ok' });
-    } else {
-      send(ws, { type: 'auth-fail' });
-    }
-    return;
-  }
-
-  // Public mutation: anyone scanning the QR can add themselves to the lobby.
-  if (msg.type === 'join') {
-    try {
-      if (!tournament || tournament.status !== 'lobby') {
-        throw new Error('No lobby is open');
-      }
-      const before = tournament.players.length;
-      tournament = addPlayer(tournament, msg.name);
-      const newPlayer = tournament.players[before];
-      saveState(tournament);
-      send(ws, { type: 'joined', playerId: newPlayer.id });
-      broadcast({ type: 'state', tournament });
-    } catch (e) {
-      send(ws, {
-        type: 'error',
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-    return;
-  }
-
-  if (!authed.has(ws)) {
-    send(ws, { type: 'error', message: 'Not authenticated' });
-    return;
-  }
-
-  try {
-    if (msg.type === 'create-lobby') {
-      tournament = createLobby(msg.name);
-    } else if (msg.type === 'remove-player') {
-      if (!tournament) throw new Error('No tournament running');
-      tournament = removePlayer(tournament, msg.playerId);
-    } else if (msg.type === 'start') {
-      if (!tournament) throw new Error('No lobby to start');
-      tournament = startTournament(tournament, {
-        shuffleSeeds: msg.shuffleSeeds,
-      });
-    } else if (msg.type === 'record') {
-      if (!tournament) throw new Error('No tournament running');
-      tournament = recordResult(tournament, {
-        matchId: msg.matchId,
-        winnerSide: msg.winnerSide,
-        score: msg.score,
-      });
-    } else if (msg.type === 'clear') {
-      if (!tournament) throw new Error('No tournament running');
-      tournament = clearResult(tournament, msg.matchId);
-    } else if (msg.type === 'reset') {
-      tournament = null;
-    }
-    saveState(tournament);
-    broadcast({ type: 'state', tournament });
-  } catch (e) {
-    send(ws, {
-      type: 'error',
-      message: e instanceof Error ? e.message : String(e),
-    });
-  }
-}
-
-function send(ws: WebSocket, msg: ServerMsg) {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify(msg));
-}
-
-function broadcast(msg: ServerMsg) {
-  const payload = JSON.stringify(msg);
-  for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(payload);
-  }
-}
-
 httpServer.on('error', (err: NodeJS.ErrnoException) => {
   if (err.code === 'EADDRINUSE') {
     console.error(
@@ -213,7 +236,7 @@ httpServer.on('error', (err: NodeJS.ErrnoException) => {
 });
 
 httpServer.listen(PORT, () => {
-  console.log(`[pingtour] http+ws on http://localhost:${PORT}`);
+  console.log(`[pingtour] http on http://localhost:${PORT}`);
   console.log(`[pingtour] data file: ${dataFilePath()}`);
   if (ADMIN_PASSWORD === 'pingpong123') {
     console.log('[pingtour] using default ADMIN_PASSWORD — set $ADMIN_PASSWORD to change');
@@ -222,7 +245,6 @@ httpServer.listen(PORT, () => {
 
 const shutdown = () => {
   console.log('\n[pingtour] shutting down…');
-  wss.close();
   httpServer.close(() => process.exit(0));
 };
 process.on('SIGINT', shutdown);

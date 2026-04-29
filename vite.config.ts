@@ -11,11 +11,11 @@ export default defineConfig({
     // protection, but in dev that's just friction.
     allowedHosts: true,
     proxy: {
-      '/ws': {
-        target: 'ws://localhost:3939',
-        ws: true,
-        rewriteWsOrigin: true,
+      '/api': {
+        target: 'http://localhost:3939',
+        changeOrigin: true,
       },
+      '/healthz': 'http://localhost:3939',
     },
   },
   test: {

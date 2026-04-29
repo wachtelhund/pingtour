@@ -1,0 +1,1 @@
+{"root":["./backend.ts","./functions/api/handler.ts","./functions/api/resource.ts","../src/types.ts","../src/protocol.ts","../src/scoring.ts","../src/bracket.ts"],"version":"5.9.3"}

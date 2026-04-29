@@ -15,3 +15,9 @@ dist-ssr
 *.sln
 *.sw?
 data/
+
+# Amplify Gen 2 — sandbox/CDK artifacts. The committed
+# `amplify_outputs.json` is a stub that the deploy pipeline overwrites.
+.amplify/
+amplify-cli.log
+amplify_outputs.local.json

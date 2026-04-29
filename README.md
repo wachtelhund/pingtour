@@ -14,8 +14,8 @@ their phone on `/admin`. State is shared between clients over WebSocket.
   scan, type a name, and appear in the lobby in real time. Admin can also
   add players manually for anyone without a phone, then hits **Start
   tournament** to build the bracket.
-- **Real-time sync** — every mutation is pushed to all connected clients
-  over WebSocket; the TV updates instantly.
+- **Near-real-time sync** — clients poll `/api/state` every 1.5s; the
+  TV updates within ~2 seconds of any admin score entry.
 - **Auto-sized bracket** — next power of two; byes given to top seeds via
   standard tennis seed order.
 - Tap any ready or completed match in `/admin` to record / edit the result.
@@ -99,7 +99,7 @@ Client-side (read by Vite at build / dev startup; put in `.env.local`):
 | Variable               | Default                  | Purpose                                                    |
 | ---------------------- | ------------------------ | ---------------------------------------------------------- |
 | `VITE_PUBLIC_BASE_URL` | `window.location.origin` | URL embedded in the join QR code, if it should differ from the URL the TV uses (e.g. when phones can't reach the TV's local network and need a tunnel instead). |
-| `VITE_WS_URL`          | same origin as the page  | WebSocket endpoint. Only needed for split deploys where the frontend (e.g. Amplify) and the WebSocket backend (e.g. App Runner) live on different origins. Accepts `wss://host/ws` or `https://host` (will become `wss://host/ws`). |
+| `VITE_API_URL`         | same origin as the page  | API base URL. Only needed for split deploys where the frontend and the backend live on different origins. Example: `https://pingtour-xxxx.onrender.com`. |
 
 Both are baked into the JS bundle at `pnpm build` time. Restart `pnpm dev`
 or rerun the build after changing.
@@ -110,117 +110,95 @@ checked server-side, so it isn't bundled into the JS.
 
 ## Deploy
 
-### Option A — Fly.io (recommended)
+### Recommended — AWS Amplify Gen 2 (everything in one app)
 
-The repo ships with a `Dockerfile` and `fly.toml` that deploy the Node
-server (which serves both the static frontend and the WebSocket) with
-a 1GB persistent volume mounted at `/data` for the tournament JSON.
+The repo is set up as a Gen 2 Amplify app:
 
-One-time setup:
+```
+amplify/
+  backend.ts                 // CDK stack: Lambda + Function URL + DynamoDB
+  functions/api/
+    resource.ts              // Function definition
+    handler.ts               // Lambda handler — same logic as server/
+amplify.yml                  // backend phase + frontend phase
+amplify_outputs.json         // stub; overwritten by deploy with real URL
+```
+
+The Amplify build runs the backend phase first (`npx ampx
+pipeline-deploy`), which provisions the Lambda + DynamoDB and writes the
+Function URL into `amplify_outputs.json`. Then the frontend phase builds
+the React bundle, which imports that JSON to know where to fetch.
+
+#### One-time: enable Gen 2 backend on the Amplify app
+
+In the Amplify Console, the app needs an IAM service role with
+permission to deploy CDK stacks. If your existing Amplify app was set
+up before Gen 2 (just hosting), the first build will fail with a
+permission error. Fix:
+
+1. Amplify Console → your app → **App settings → IAM roles** →
+   **Edit** → click **Create and use a new service role** (or attach
+   `AmplifyBackendDeployFullAccess`).
+2. Trigger another build.
+
+#### Deploy
+
+After pushing this branch:
+
+1. Amplify auto-builds. Watch the build log in the Amplify Console — the
+   "Backend" phase deploys CDK, the "Build" phase compiles the frontend.
+   First-time backend deploy takes ~3–5 minutes.
+2. After it's green, set the **SPA rewrite** in **App settings →
+   Rewrites and redirects**:
+
+   | Source | Target | Type |
+   |---|---|---|
+   | `</^[^.]+$\|\.(?!(css\|gif\|ico\|jpg\|js\|png\|txt\|svg\|woff\|woff2\|ttf\|map\|json\|webp)$)([^.]+$)/>` | `/index.html` | `200 (Rewrite)` |
+
+3. Set this env var in **App settings → Environment variables** so the
+   QR encodes the public URL:
+
+   ```
+   VITE_PUBLIC_BASE_URL = https://main.<your-app-id>.amplifyapp.com
+   ```
+
+   Trigger one more redeploy so it's baked into the bundle.
+
+That's the deploy. Open the Amplify URL on the TV, `/admin` on your
+phone, password `pingpong123`. State persists in DynamoDB, survives
+Lambda cold starts.
+
+#### Changing the admin password
+
+Edit `ADMIN_PASSWORD` in `amplify/functions/api/resource.ts`, push.
+(Yes, it's in source — for a casual office tournament that's fine. To
+keep it out of git, replace with a `secret('admin_password')` reference
+and set the secret via `npx ampx sandbox secret set admin_password`.)
+
+### Local dev
 
 ```sh
-# Install flyctl: https://fly.io/docs/flyctl/install/
-flyctl auth signup            # or `flyctl auth login`
-
-# Pick a unique name. Update `app = "..."` in fly.toml to match.
-flyctl apps create pingtour-<your-suffix>
-
-# Persistent volume for the state file.
-flyctl volumes create pingtour_data --region arn --size 1
-
-# Set the admin password as a secret (encrypted, not bundled).
-flyctl secrets set ADMIN_PASSWORD='something-strong'
-
-flyctl deploy
+pnpm install
+pnpm dev          # Vite (5173) + local Node server (3939) in parallel
 ```
 
-After the first deploy:
+The local Node server (`server/index.ts`) provides the same REST API on
+`localhost:3939`, so dev doesn't need DynamoDB or any AWS access. The
+frontend hits `/api` via the Vite proxy.
 
-```sh
-flyctl deploy                 # ship a new version
-flyctl logs                   # follow runtime logs
-flyctl ssh console            # shell into the VM
-flyctl secrets set ADMIN_PASSWORD='new'   # rotate the password
-```
+### Alternatives
 
-The app will be at `https://<your-app-name>.fly.dev/`. Update
-`VITE_PUBLIC_BASE_URL` in `.env.local` to that URL **before deploying**
-so the QR code on the TV encodes the public domain instead of
-`localhost` — the env var is baked into the bundle at build time.
+If you don't want Amplify, the same code runs as a single container on:
 
-The default `fly.toml` keeps the machine awake
-(`min_machines_running = 1`) so WebSocket connections don't drop
-mid-tournament. Flip `auto_stop_machines = "stop"` and
-`min_machines_running = 0` if you want it to sleep when idle (cheaper,
-but every cold start drops live clients).
+- **Any Docker host** — `docker compose up -d --build` with the
+  included `Dockerfile`. State goes to a local volume.
+- **Render** — connect the repo, free tier, auto-detects the
+  `Dockerfile`.
+- **DigitalOcean Droplet** — `bash deploy/bootstrap.sh` then
+  `docker compose up -d --build`.
 
-### Option B — laptop + tunnel (zero deploy)
-
-Run the production server on the laptop driving the TV and tunnel it:
-
-```sh
-pnpm build
-ADMIN_PASSWORD='your-password' pnpm start            # http+ws on :3939
-# in another terminal:
-cloudflared tunnel --url http://localhost:3939       # or: ngrok http 3939
-```
-
-Set `VITE_PUBLIC_BASE_URL` to the tunnel URL in `.env.local` and
-rebuild so the QR points at the tunnel, not at `localhost`.
-
-### Option C — AWS Amplify (frontend) + App Runner (backend)
-
-This is a **split deploy** — Amplify Hosting serves the static frontend
-and App Runner runs the WebSocket server. Two services, two URLs, but
-both stay inside AWS. The repo includes `amplify.yml` (Amplify build
-spec) and `deploy/apprunner.yaml` (App Runner notes).
-
-**1. Backend on App Runner.** App Runner Console → "Source code
-repository" → pick this repo → "Automatic" deploy. It detects the
-`Dockerfile` and builds it. Set environment variables in the console:
-
-```
-ADMIN_PASSWORD = something-strong
-```
-
-App Runner gives you a URL like
-`https://<random>.<region>.awsapprunner.com`. Copy it.
-
-> ⚠️ App Runner has **no persistent volume**. State resets on every
-> deploy and instance restart. Fine for a one-day tournament, painful
-> for anything longer-lived. For persistence, use ECS Fargate + EFS,
-> Lightsail Containers (same Dockerfile), or one of the other options
-> above.
-
-**2. Frontend on Amplify.** Amplify Console → "Host web app" → connect
-the repo. Amplify auto-detects `amplify.yml`. Set env vars under **App
-settings → Environment variables**:
-
-```
-VITE_WS_URL           = wss://<your-apprunner-url>/ws
-VITE_PUBLIC_BASE_URL  = https://<your-amplify-url>
-```
-
-(Or use a custom domain in Amplify and use that for
-`VITE_PUBLIC_BASE_URL`.)
-
-Add the SPA rewrite rule in the Amplify Console under **Rewrites and
-redirects** — the exact pattern is in the comment block at the bottom
-of `amplify.yml`. Without it, `/admin` and `/join` 404 instead of
-loading the SPA shell.
-
-Trigger a redeploy. The frontend at the Amplify URL will WebSocket-connect
-to the App Runner URL.
-
-### Option D — any Docker host
-
-```sh
-docker build -t pingtour .
-docker run -p 3939:3939 -v $(pwd)/data:/data \
-  -e ADMIN_PASSWORD='your-password' pingtour
-```
-
-The image is ~200MB.
+In those cases set `ADMIN_PASSWORD` as the only env var; everything else
+defaults sensibly.
 
 ## Tournament rules
 
