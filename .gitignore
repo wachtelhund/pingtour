@@ -21,3 +21,6 @@ data/
 .amplify/
 amplify-cli.log
 amplify_outputs.local.json
+
+# TS incremental build cache
+*.tsbuildinfo
